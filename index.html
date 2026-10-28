@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#103c68"><title>Wash & Go Scanner</title>
+<style>
+:root{font-family:-apple-system,BlinkMacSystemFont,system-ui,Arial;color:#12334f;background:#eef5fb}*{box-sizing:border-box}body{margin:0}header{background:#103c68;color:white;padding:20px;text-align:center}header strong{font-size:25px;letter-spacing:2px}main{max-width:470px;margin:auto;padding:15px}.card{background:white;padding:17px;border-radius:15px;margin:12px 0;box-shadow:0 4px 18px #103c6815}h2{margin:0 0 12px;font-size:20px}label{font-size:14px;font-weight:650}input{display:block;width:100%;border:1px solid #aac1d4;border-radius:9px;padding:12px;font-size:17px;margin:8px 0 13px}button{background:#087fc0;color:white;border:0;border-radius:10px;padding:12px 16px;font-size:16px;font-weight:650;cursor:pointer}button.secondary{background:#536b80}button:disabled{opacity:.5}.hidden{display:none!important}#camera{width:100%;aspect-ratio:4/5;max-height:60vh;object-fit:cover;background:#081b29;border-radius:12px}#message{padding:10px 0;min-height:50px;font-weight:650}#message.error{color:#a52235}#message.ok{color:#087b40}.sub{font-size:13px;color:#557084}#scannerPanel{text-align:center}#scannerPanel button{margin-top:8px}details{margin-top:18px;text-align:left}small{color:#536b80}
+</style></head><body><header><strong>WASH & GO</strong><div>SCANNER • V2.6.9.6</div></header><main>
+<section class="card" id="setup"><h2>1. Connecter le serveur</h2><label for="api">URL de la WebApp Apps Script (/exec)</label><input id="api" type="url" autocapitalize="off" autocomplete="url" spellcheck="false" placeholder="https://script.google.com/macros/s/.../exec"><button id="testBtn">Tester le serveur</button><p id="serverStatus" class="sub"></p></section>
+<section class="card" id="pairBox"><h2>2. Jumeler au PC</h2><p class="sub">Sur le PC : Paramétrage → Smartphones → Activer ce PC et jumeler.</p><label for="code">Code à 6 chiffres</label><input id="code" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="one-time-code" placeholder="000000"><button id="pairBtn">Jumeler</button><p id="pairStatus" class="sub"></p></section>
+<section class="card hidden" id="scannerPanel"><h2>Scanner vers le PC</h2><video id="camera" playsinline autoplay muted></video><div id="message">Caméra en attente</div><button id="startBtn">Activer la caméra</button> <button class="secondary" id="stopBtn">Arrêter</button><p class="sub">La commande s'ouvre uniquement sur le PC. Ce téléphone reste en mode scanner.</p><details><summary>Envoyer manuellement un numéro de commande</summary><input id="manual" placeholder="WG-YYYYMMDD-HHMMSS-XXXXXX"><button id="manualBtn">Envoyer au PC</button></details><p><button class="secondary" id="unpairBtn">Changer de PC</button></p></section>
+</main>
+<script>
+'use strict';
+const $=id=>document.getElementById(id);
+let api=localStorage.getItem('wgScannerApi')||'',device=localStorage.getItem('wgScannerDevice')||'',stream=null,detector=null,jsqrReady=false,scanning=false,sending=false,lastId='',lastTime=0,loopTimer=null;
+$('api').value=api;
+function show(){ $('pairBox').classList.toggle('hidden',!!device);$('scannerPanel').classList.toggle('hidden',!device); }
+function serverStatus(s){$('serverStatus').textContent=s}
+function msg(s,type){$('message').textContent=s;$('message').className=type||''}
+function endpoint(){const s=$('api').value.trim();if(!/^https:\/\/script\.google\.com\/macros\/s\/[^/?#]+\/exec\/?$/.test(s))throw Error('Utilisez l’URL /exec de votre WebApp Apps Script');return s.replace(/\/$/,'')}
+function jsonp(action,params={}){
+ return new Promise((resolve,reject)=>{
+  let url;try{url=endpoint()}catch(e){reject(e);return}
+  const name='wgJsonp_'+Math.random().toString(36).slice(2)+Date.now();
+  const script=document.createElement('script');let done=false;
+  const cleanup=()=>{if(done)return;done=true;clearTimeout(timeout);delete window[name];script.remove()};
+  const timeout=setTimeout(()=>{cleanup();reject(Error('Délai dépassé : serveur inaccessible (15 s)'))},15000);
+  window[name]=result=>{cleanup();if(result&&result.ok)resolve(result);else reject(Error(result&&result.error||'Réponse serveur invalide'))};
+  const q=new URLSearchParams({wgscanner:'1',action,callback:name,...params});
+  script.onerror=()=>{cleanup();reject(Error('Chargement du serveur impossible. Vérifier le déploiement et les autorisations.'))};
+  script.src=url+'?'+q.toString();document.head.appendChild(script);
+ });
+}
+async function test(){ $('testBtn').disabled=true;try{const r=await jsonp('ping');api=endpoint();localStorage.setItem('wgScannerApi',api);serverStatus('✓ Serveur connecté — '+r.version)}catch(e){serverStatus('Erreur : '+e.message)}finally{$('testBtn').disabled=false}}
+async function pair(){const code=$('code').value.replace(/\D/g,'');if(code.length!==6){$('pairStatus').textContent='Saisir les 6 chiffres';return}$('pairBtn').disabled=true;try{const r=await jsonp('pair',{code,name:'iPhone Scanner'});device=r.device;api=endpoint();localStorage.setItem('wgScannerApi',api);localStorage.setItem('wgScannerDevice',device);$('pairStatus').textContent='✓ Jumelage réussi';show();msg('Jumelé. Appuyer sur Activer la caméra.')}catch(e){$('pairStatus').textContent='Erreur : '+e.message}finally{$('pairBtn').disabled=false}}
+function stop(){scanning=false;clearTimeout(loopTimer);loopTimer=null;if(stream){stream.getTracks().forEach(t=>t.stop());stream=null}$('camera').srcObject=null;$('startBtn').disabled=false}
+async function fallback(){if(typeof window.jsQR==='function'){jsqrReady=true;return}await new Promise((resolve,reject)=>{const s=document.createElement('script');s.src='https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js';s.onload=resolve;s.onerror=()=>reject(Error('Bibliothèque QR inaccessible. Vérifier la connexion Internet.'));document.head.appendChild(s)});jsqrReady=typeof window.jsQR==='function';if(!jsqrReady)throw Error('Lecteur QR non disponible')}
+async function start(){if(scanning)return;$('startBtn').disabled=true;try{
+ if(!navigator.mediaDevices?.getUserMedia)throw Error('Caméra non disponible. Ouvrir cette page HTTPS directement dans Safari.');
+ msg('Demande d’autorisation caméra…');
+ try{stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'}},audio:false})}
+ catch(e){if(e.name==='OverconstrainedError')stream=await navigator.mediaDevices.getUserMedia({video:true,audio:false});else throw e}
+ $('camera').srcObject=stream;await $('camera').play();
+ if('BarcodeDetector' in window){try{detector=new BarcodeDetector({formats:['qr_code']})}catch(e){detector=null}}
+ if(!detector)await fallback();
+ scanning=true;msg('Caméra prête — présentez le QR code');loop();
+ }catch(e){msg('Erreur caméra : '+(e.name==='NotAllowedError'?'accès refusé par le navigateur. Vérifier les autorisations du site.':e.message),'error');stop()}}
+async function loop(){if(!scanning)return;try{if(!sending){let raw='';const v=$('camera');if(detector){const r=await detector.detect(v);if(r.length)raw=r[0].rawValue}else if(jsqrReady&&v.videoWidth){const c=document.createElement('canvas');c.width=v.videoWidth;c.height=v.videoHeight;const ctx=c.getContext('2d',{willReadFrequently:true});ctx.drawImage(v,0,0);const data=ctx.getImageData(0,0,c.width,c.height);const r=window.jsQR(data.data,c.width,c.height,{inversionAttempts:'dontInvert'});if(r)raw=r.data}if(raw)await send(raw)}}catch(e){msg('Erreur de lecture : '+e.message,'error')}if(scanning)loopTimer=setTimeout(loop,350)}
+function extract(raw){const m=String(raw||'').match(/WG-\d{8}-\d{6}-[A-Za-z0-9]{4,12}/);return m?m[0]:''}
+async function send(raw){if(sending)return;const id=extract(raw);if(!id){msg('QR non reconnu : pas de numéro de commande Wash & Go','error');return}if(lastId===id&&Date.now()-lastTime<5000)return;sending=true;msg('Transmission au PC…');try{const r=await jsonp('scan',{device,raw:id});lastId=id;lastTime=Date.now();msg('✓ Envoyé au PC : '+r.orderId,'ok');if(navigator.vibrate)navigator.vibrate(70)}catch(e){msg('Envoi impossible : '+e.message,'error')}finally{sending=false}}
+$('testBtn').addEventListener('click',test);$('pairBtn').addEventListener('click',pair);$('startBtn').addEventListener('click',start);$('stopBtn').addEventListener('click',()=>{stop();msg('Caméra arrêtée')});$('manualBtn').addEventListener('click',()=>send($('manual').value));$('unpairBtn').addEventListener('click',()=>{stop();device='';localStorage.removeItem('wgScannerDevice');show()});window.addEventListener('pagehide',stop);show();
+</script></body></html>
